@@ -22,7 +22,7 @@ A FastAPI backend for a course catalog providing endpoints for filtering, sortin
    ```
 
 **Start the development server:**
-    ```bash
+```bash
    fastapi dev main.py
    ```
 - The API will be available at http://127.0.0.1:8000, and interactive documentation will be generated at /docs.
