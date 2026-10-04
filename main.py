@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends
+from typing import Literal
 
 from data import get_all_courses, find_course
 from models import Course
@@ -14,7 +15,7 @@ def read_root():
     return {"message": "Course Catalog API is running"}
 
 @app.get("/courses", response_model=list[Course])
-def list_courses(is_elective: bool | None = None, sort: str = "popular", p: dict = Depends(pagination),): 
+def list_courses(is_elective: bool | None = None, sort: Literal["title", "popular"] = "popular", p: dict = Depends(pagination),): 
     courses = get_all_courses()
 
     if is_elective is not None:
