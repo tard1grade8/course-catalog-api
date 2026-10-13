@@ -40,3 +40,12 @@ A FastAPI backend for a course catalog providing endpoints for filtering, sortin
 - GET /courses?page=4&page_size=2 — Returns an empty list [] as there are no courses on page 4.
 - GET /courses/web-security — Returns details for the single course Web Security Essentials.
 - GET /courses/nope — Returns HTTP status 404 Not Found with {"detail": "Course not found"}.
+
+## What changed (Lab 5)
+
+- **CORS Middleware**: Configured `CORSMiddleware` with `allow_origins=["http://localhost:3000"]` to allow browser-based cross-origin requests from the Next.js frontend.
+- **CamelCase JSON**: Configured Pydantic alias generator (`to_camel`) to output field names in camelCase (e.g., `isElective`, `studentName`) for Seamless integration with JavaScript.
+- **New Endpoints**:
+  - `POST /courses/{id}/like`: Increments the course like count and returns the updated course object.
+  - `POST /enrollments`: Validates student enrollment requests and returns the newly created enrollment record.
+  - `GET /enrollments`: Returns all recorded course enrollments.
