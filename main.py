@@ -3,7 +3,7 @@ from typing import Literal
 from fastapi.middleware.cors import CORSMiddleware
 
 from data import get_all_courses, find_course
-from models import Course, EnrollmentIn, Enrollment
+from schemas import Course, EnrollmentIn, Enrollment
 
 ENROLLMENTS: list[Enrollment] = []
 
