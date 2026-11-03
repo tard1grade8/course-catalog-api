@@ -49,3 +49,23 @@ A FastAPI backend for a course catalog providing endpoints for filtering, sortin
   - `POST /courses/{id}/like`: Increments the course like count and returns the updated course object.
   - `POST /enrollments`: Validates student enrollment requests and returns the newly created enrollment record.
   - `GET /enrollments`: Returns all recorded course enrollments.
+
+## Experiments Log
+
+### Experiment 2: The database protected the data but answered wrongly
+* **Changed:** Removed the `Field(min_length=2)` validation from `name` in `StudentIn` schema inside `schemas.py`.
+* **Observed:** Sending a request with `name: "N"` to `POST /students` caused the database `CHECK` constraint (`students_name_check`) to fail, returning a `500 Internal Server Error` instead of `422 Unprocessable Entity`.
+* **Reason:** `students_name_check` was not mapped in `CONSTRAINT_ERRORS`, so `raise_http_error` treated the unhandled `IntegrityError` as an unexpected server bug. Pydantic validation acts as the first line of defense (returning 422 before touching the database), while the database `CHECK` constraint serves as the final fail-safe.
+* **Fix:** Restored `Field(min_length=2)` to `StudentIn`.
+
+### Experiment 3: A typo in a constraint name
+* **Changed:** Replaced `"students_email_key"` with `"students_email_uniq"` in `CONSTRAINT_ERRORS` inside `main.py`.
+* **Observed:** Sending `POST /students` with an already registered email (`aigerim@example.com`) returned a `500 Internal Server Error`.
+* **Reason:** PostgreSQL reported the constraint violation under the name `students_email_key`. Since the key was missing in `CONSTRAINT_ERRORS`, `raise_http_error` re-raised the exception, resulting in a 500 response.
+* **Fix:** Restored the correct key `"students_email_key"`.
+
+### 1. Why is the response chosen by the constraint name rather than by SQLSTATE?
+The `SQLSTATE` code (e.g., `23505` for `UNIQUE_VIOLATION` or `23503` for `FOREIGN_KEY_VIOLATION`) is generic across all constraints of the same type in the database. It does not indicate *which specific field or relation* failed (e.g., whether a duplicate student email or a duplicate enrollment occurred). Identifying the exception by its exact `constraint_name` allows the API to return precise HTTP status codes and user-friendly error messages (such as returning 409 Conflict for an existing email vs 404 Not Found for a non-existent student ID).
+
+### 2. Why is it better to catch the error after `commit()` than to check with a `SELECT` in advance?
+Following the EAFP (*Easier to ask for forgiveness than permission*) principle avoids race conditions (Time-of-Check to Time-of-Use / TOCTOU). If the API checks availability via a `SELECT` query prior to an `INSERT`, a concurrent request could insert the same record in between the check and the write. The preliminary check would pass, but the insert would fail anyway. Catching `IntegrityError` during `db.commit()` delegates atomicity to PostgreSQL, ensuring thread-safe execution without extra database round-trips.
