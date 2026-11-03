@@ -16,8 +16,8 @@ from db import Base
 class Course(Base):
     __tablename__ = "courses"
     __table_args__ = (
-        CheckConstraint("credits > 0", name="credits"),
-        CheckConstraint("likes >= 0", name="likes"),
+        CheckConstraint("credits > 0", name="course_credits_check"),
+        CheckConstraint("likes >= 0", name="course_likes_check"),
     )
 
     id: Mapped[str] = mapped_column(primary_key=True)
@@ -26,6 +26,7 @@ class Course(Base):
     credits: Mapped[int]
     is_elective: Mapped[bool] = mapped_column(server_default=text("false"))
     likes: Mapped[int] = mapped_column(server_default=text("0"))
+    level: Mapped[str]
 
     enrollments: Mapped[list["Enrollment"]] = relationship(
         back_populates="course", passive_deletes=True
