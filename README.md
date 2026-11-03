@@ -81,3 +81,21 @@ Following the EAFP (*Easier to ask for forgiveness than permission*) principle a
 * **Observed:** Executing `alembic upgrade head` failed with `sqlalchemy.exc.IntegrityError: (psycopg.errors.NotNullViolation) column "level" of relation "courses" contains null values`.
 * **Reason:** Alembic compares schemas, not data. Existing rows in the non-empty table cannot satisfy the `NOT NULL` constraint without a default value or manual population strategy.
 * **Fix:** Implemented a three-step migration: 1) add `level` as `nullable=True`, 2) run `UPDATE` to set default values based on `is_elective`, 3) alter column to `nullable=False`.
+
+### Experiment 6: A forgotten import models
+* **Changed:** Commented out `import models` in `alembic/env.py` and ran `alembic revision --autogenerate -m "oops"`.
+* **Observed:** Alembic generated a migration containing `op.drop_table()` for all project tables (`courses`, `students`, `enrollments`).
+* **Reason:** Without importing the models module, SQLAlchemy's `Base.metadata` remains empty. Alembic assumes all existing database tables were deleted from the code and generates DDL commands to drop them.
+* **Fix:** Deleted the generated migration file and un-commented `import models` in `alembic/env.py`.
+
+### Experiment 7: The model changed, but there is no migration
+* **Changed:** Added an optional `phone: Mapped[str | None]` field to the `Student` model in `models.py` without generating a migration.
+* **Observed:** Running `alembic check` failed with `FAILED: New upgrade operations detected` (`add_column` for `students.phone`).
+* **Reason:** `alembic check` verifies that the live database schema matches the current SQLAlchemy ORM models. Detecting unapplied model changes prevents deploying code without corresponding database migrations.
+* **Fix:** Removed the `phone` field from `models.py`.
+
+### Experiment 8: Two heads and a merge
+* **Changed:** Created two conflicting migrations from `0002` using `--splice` (`0003` and `0004`).
+* **Observed:** Running `alembic heads` displayed two active head revisions, and `alembic upgrade head` failed with `Multiple head revisions are present for given argument 'head'`.
+* **Reason:** Concurrent branch development created divergent revision histories rooted at revision `0002`. Alembic cannot determine execution order without an explicit merge.
+* **Fix:** Resolved by generating a merge revision (`alembic merge heads`), then deleted temporary experimental revision files (`0003`, `0004`, `0005`) to restore the linear history at `0002`.
