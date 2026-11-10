@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from graphql_api import graphql_app
 
 from db import get_db
 import problem
@@ -21,6 +22,7 @@ import services
 
 app = FastAPI(title="Course Catalog API")
 problem.install(app)
+app.include_router(graphql_app, prefix="/graphql")
 
 app.add_middleware(
     CORSMiddleware,
