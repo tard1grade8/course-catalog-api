@@ -19,9 +19,12 @@ from schemas import (
     StudentOut,
 )
 import services
+import counter
 
 app = FastAPI(title="Course Catalog API")
 problem.install(app)
+counter.install(app)
+
 app.include_router(graphql_app, prefix="/graphql")
 
 app.add_middleware(

@@ -184,3 +184,49 @@ In the second variant (`a.likes = Course.likes + 1`), SQLAlchemy generates an SQ
 
 ### Relationship to Row Locks (Lab 6)
 In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-level lock (`FOR UPDATE`) on the target row for the duration of the transaction. When Bob executes `UPDATE courses SET likes = likes + 1`, PostgreSQL forces Bob's transaction to wait until Alice's transaction completes. Once Alice commits (`likes` becomes `12`), Bob's `UPDATE` executes against the freshly committed value (`12 + 1 = 13`), preserving both updates without explicit manual locking.
+
+## Experiment Log for Lab 8
+
+### Experiment 1. Query Syntax Error Returns HTTP 200
+
+* **Action:** Executed GraphQL queries containing typos in field names (e.g., `{ course(id: "api-design") { titel } }`) and using `snake_case` instead of `camelCase` for argument names (e.g., `{ courses(is_elective: true) { id } }`).
+* **Result:** 
+  * HTTP Status: **`200 OK`**.
+  * Response Body: A JSON payload with `"data": null` alongside an `"errors"` array specifying error details (e.g., `"Cannot query field 'titel' on type 'Course'"` or hints for unknown arguments).
+* **Explanation:** Per the GraphQL specification, syntax errors and schema validation failures do not trigger network-layer HTTP error codes (`4xx`/`5xx`), unlike REST APIs. The GraphQL engine processes the HTTP request successfully, returning `200 OK`, and encapsulates execution and validation errors inside the top-level `"errors"` key.
+* **Resolution:** Corrected queries to adhere to the GraphQL schema conventions (using `camelCase` for arguments like `isElective` and exact schema field names like `title`).
+
+---
+
+### Experiment 2. Null Propagation Rule and Non-Nullable Types (`!`)
+
+* **Action:** Temporarily removed `| None` from the `course` resolver return type annotation in `graphql_api.py` (changing the GraphQL field type from `Course` to non-nullable `Course!`). Queried a non-existent course individually and alongside a valid course using aliases (`{ a: course(id: "api-design") { title } b: course(id: "nope") { title } }`).
+* **Result:**
+  * Single query: Returned `"data": null` with the error `"Cannot return null for non-nullable field Query.course"`.
+  * Aliased query: Even though field `a` was valid and could return data, the entire top-level `"data"` object collapsed to `null`.
+* **Explanation:** Under GraphQL's Null Propagation Rule, if a non-nullable field (`!`) yields `null`, the error bubbles up to the nearest parent field that allows `null`. Since the top-level `Query` root cannot be `null`, the entire `"data"` payload is destroyed.
+* **Resolution:** Reverted the resolver signature to `CourseType | None` for optional database entities, ensuring missing resources return `null` safely without wiping out valid data.
+
+---
+
+### Experiment 3. Blocking Mutations via HTTP GET
+
+* **Action:** Attempted to execute both read queries and data-modifying mutations using URL query parameters via the HTTP GET method (e.g., `http://localhost:8000/graphql?query=mutation{likeCourse(id:"api-design"){course{likes}}}`).
+* **Result:**
+  * Read query (`query`) via GET returned **`200 OK`** with the requested data.
+  * Mutation (`mutation`) via GET was rejected with **`400 Bad Request`** and the plain text message `mutations are not allowed when using GET`.
+* **Explanation:** Standard HTTP semantics dictate that GET requests must be safe and idempotent (producing no side effects). Strawberry GraphQL enforces this standard by blocking mutations sent via GET requests to prevent accidental state modifications (e.g., from browser prefetching or search indexers).
+
+---
+
+### Experiment 4. N+1 Query Problem and Database Call Scaling
+
+* **Action:** Utilized custom SQL counter middleware (`counter.py` injecting the `X-SQL-Queries` HTTP header) to benchmark database query counts for nested GraphQL queries under initial seed data (3 students) vs. expanded seed data (20 students via `more_students.sql`).
+* **Benchmark Results:**
+
+| Query | 3 Students | 20 Students | SQL Query Composition Breakdown |
+| :--- | :---: | :---: | :--- |
+| `students -> enrollments -> course` | 7 | 27 | $1 + N + \text{distinct courses} = 1 + 20 + 6$ |
+| `enrollments -> course, student` | 7 | 24 | $1 + \text{distinct courses} + \text{distinct students} = 1 + 6 + 17$ |
+
+* **Explanation:** Due to SQLAlchemy ORM lazy loading, GraphQL resolvers issue separate SQL queries for each nested relationship on every row. Increasing student rows by 6.6x caused total SQL queries to jump from 7 to 27 (the classic N+1 problem). While latency remains negligible in local GraphiQL testing, this pattern severely degrades performance in production environments under scale.
