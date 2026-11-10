@@ -230,3 +230,17 @@ In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-lev
 | `enrollments -> course, student` | 7 | 24 | $1 + \text{distinct courses} + \text{distinct students} = 1 + 6 + 17$ |
 
 * **Explanation:** Due to SQLAlchemy ORM lazy loading, GraphQL resolvers issue separate SQL queries for each nested relationship on every row. Increasing student rows by 6.6x caused total SQL queries to jump from 7 to 27 (the classic N+1 problem). While latency remains negligible in local GraphiQL testing, this pattern severely degrades performance in production environments under scale.
+
+---
+
+### Experiment 5. Broken Batch Function in DataLoader
+
+* **Action:** Temporarily modified the `batch_loader` function in `graphql_api.py` to directly return SQL query results sorted descending by column instead of grouping and ordering rows by the incoming keys (`select(model).where(column.in_(keys)).order_by(column.desc())`).
+* **Result:**
+  * **Length Mismatch Case (`students -> enrollments`):** Executing `{ students { name enrollments { course { title } } } }` triggered a `strawberry.exceptions.WrongNumberOfResultsReturned` exception ("Received wrong number of results in dataloader, expected: 3, received: 6").
+  * **Silent Data Corruption Case (`enrollments -> course`):** Executing `{ enrollments { id course { title } } }` returned no runtime errors, but resulted in incorrect entity associations (e.g., Enrollment 2 was associated with "Backend Foundations: FastAPI" instead of "AI/LLM Integration").
+* **Explanation:** DataLoaders strictly enforce two core contracts:
+  1. The batch loader function must return an array of results with the exact same length as the input key array.
+  2. Each index in the returned result array must strictly correspond to the key at the same index in the input key array.
+  When the array length matches by coincidence (6 keys and 6 rows), positional mapping without key-based dictionary grouping causes silent data mixing, which is far more dangerous than an explicit length error.
+* **Resolution:** Restored `batch_loader` to assemble result arrays explicitly ordered by incoming keys using a `defaultdict` registry.
