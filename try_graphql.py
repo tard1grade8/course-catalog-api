@@ -36,8 +36,8 @@ CASES = [
         "None",
     ),
     (
-        "student(id: 2) -> courses",
-        "{ student(id: 2) { enrollments { course { id } } } }",
+        "student(id: 1) -> courses",
+        "{ student(id: 1) { enrollments { course { id } } } }",
         lambda d: str(len(d["data"]["student"]["enrollments"])),
         "3",
     ),
