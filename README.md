@@ -244,3 +244,32 @@ In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-lev
   2. Each index in the returned result array must strictly correspond to the key at the same index in the input key array.
   When the array length matches by coincidence (6 keys and 6 rows), positional mapping without key-based dictionary grouping causes silent data mixing, which is far more dangerous than an explicit length error.
 * **Resolution:** Restored `batch_loader` to assemble result arrays explicitly ordered by incoming keys using a `defaultdict` registry.
+
+---
+
+### Experiment 6. Dangerous Queries Without Protection and With Protection
+
+* **Action:** Executed 6 potentially harmful GraphQL queries using `try_protection.py` against the server before and after applying validation helpers (`check_limit`, `parse_id`), custom error masking (`MaskErrors`), and Strawberry extensions (`QueryDepthLimiter`, `MaxAliasesLimiter`).
+* **Comparison Results:**
+
+| Query | Without Protection | With Protection |
+| :--- | :--- | :--- |
+| `a depth-6 cycle` | Executed, data returned | `error: 'Cycle' exceeds maximum operation depth of 5` |
+| `12 aliases` | Executed (12 likes applied in 1 POST) | `error: 12 aliases found. Allowed: 10` |
+| `limit: -1` | Unhandled DB Exception (`psycopg.errors.InvalidRowCountInLimitClause`) | `error: limit must be between 1 and 100` |
+| `id: "abc"` | Unhandled Python Exception (`invalid literal for int()`) | `error: Invalid ID: 'abc'` |
+| `id of 20 digits` | Unhandled DB Exception (`psycopg.errors.NumericValueOutOfRange`) | `error: Unexpected error.` |
+| `introspection` | Schema map returned | Schema map returned |
+
+* **Analysis & Answers to Mandatory Questions:**
+  1. **What internal details were exposed without protection?** The unprotected server exposed internal SQL query strings, database driver names (`psycopg`), PostgreSQL constraint names, column names, parameters, and raw Python execution stack traces directly in the `"errors"` JSON payload.
+  2. **Why write explicit checks for `limit` and `id` instead of relying entirely on `MaskErrors`?** Explicit validation raises clean, domain-specific `GraphQLError` messages (e.g., `Invalid ID: 'abc'`), which clearly instruct the client how to fix their query. Relying solely on `MaskErrors` hides all unhandled runtime/DB exceptions behind a generic `Unexpected error.`, making legitimate client debugging impossible for predictable validation errors.
+  3. **Which legitimate query would fail if `max_depth` was lowered to 2?** The standard "My Courses" query (`student -> enrollments -> course`) requires a nesting depth of 3. Lowering `max_depth` to 2 would break legitimate nested relation queries across the API.
+
+---
+
+### Experiment 7. Introspection Control in Closed Environments
+
+* **Action:** Configured `GRAPHQL_INTROSPECTION=false` in `.env` and restarted the server.
+* **Result:** Introspection queries (such as `{ __schema { queryType { name } } }`) were rejected by the `DisableIntrospection` extension with an error indicating that schema introspection is disabled.
+* **Explanation:** While introspection is essential during local development and public API exploration (e.g., GraphiQL autocompletion), disabling it in closed production environments prevents malicious actors from automatically mapping all available types, queries, and mutations.
