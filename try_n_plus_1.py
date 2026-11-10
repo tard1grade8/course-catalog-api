@@ -14,7 +14,7 @@ QUERIES = [
 ]
 
 for title, query in QUERIES:
-    response = httpx.post(URL, json={"query": query})
+    response = httpx.post(URL, json={"query": query}, timeout=30.0)
     response.raise_for_status()
     rows = len(next(iter(response.json()["data"].values())))
     queries = response.headers["x-sql-queries"]

@@ -1,23 +1,50 @@
+from collections import defaultdict
+from datetime import datetime
 from typing import Annotated
 
 import strawberry
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from strawberry.dataloader import DataLoader
 from strawberry.fastapi import BaseContext, GraphQLRouter
 from strawberry.types import Info
 
 from db import get_db
 from models import Course, Enrollment, Student
-
-from datetime import datetime
-
 import services
 
+
+def batch_loader(db: Session, column, many: bool = False) -> DataLoader:
+    """Gathers keys in one pass and loads all rows with a single IN (...) query."""
+    model = column.class_
+
+    async def load(keys: list) -> list:
+        stmt = select(model).where(column.in_(keys))
+        rows = db.scalars(stmt).all()
+
+        groups = defaultdict(list)
+        for row in rows:
+            groups[getattr(row, column.key)].append(row)
+
+        if many:
+            return [groups[key] for key in keys]
+        return [groups[key][0] if groups[key] else None for key in keys]
+
+    return DataLoader(load_fn=load)
+
+
 class Context(BaseContext):
+    """Created per request: the session and loaders don't outlive the request."""
+
     def __init__(self, db: Session):
         super().__init__()
         self.db = db
+        self.course = batch_loader(db, Course.id)
+        self.student = batch_loader(db, Student.id)
+        self.enrollments_of_course = batch_loader(db, Enrollment.course_id, many=True)
+        self.enrollments_of_student = batch_loader(db, Enrollment.student_id, many=True)
+
 
 def get_context(db: Annotated[Session, Depends(get_db)]) -> Context:
     return Context(db)
@@ -32,44 +59,66 @@ class CourseType:
     is_elective: bool
     likes: int
     level: str
-    enrollments: list["EnrollmentType"]
+
+    @strawberry.field
+    async def enrollments(self, info: Info) -> list["EnrollmentType"]:
+        return await info.context.enrollments_of_course.load(self.id)
+
 
 @strawberry.type(name="Student")
 class StudentType:
     id: strawberry.ID
     name: str
     email: str
-    enrollments: list["EnrollmentType"]
+
+    @strawberry.field
+    async def enrollments(self, info: Info) -> list["EnrollmentType"]:
+        return await info.context.enrollments_of_student.load(int(self.id))
+
 
 @strawberry.type(name="Enrollment")
 class EnrollmentType:
     id: strawberry.ID
     enrolled_at: datetime
-    course: CourseType
-    student: StudentType
+    course_id: strawberry.Private[str]
+    student_id: strawberry.Private[int]
+
+    @strawberry.field
+    async def course(self, info: Info) -> CourseType:
+        return await info.context.course.load(self.course_id)
+
+    @strawberry.field
+    async def student(self, info: Info) -> StudentType:
+        return await info.context.student.load(self.student_id)
+
 
 @strawberry.type
 class UserError:
     code: str
     message: str
 
+
 @strawberry.input
 class EnrollInput:
     course_id: strawberry.ID
     student_id: strawberry.ID
+
 
 @strawberry.type
 class EnrollPayload:
     enrollment: EnrollmentType | None = None
     user_errors: list[UserError] = strawberry.field(default_factory=list)
 
+
 @strawberry.type
 class LikePayload:
     course: CourseType | None = None
     user_errors: list[UserError] = strawberry.field(default_factory=list)
 
+
 def as_user_errors(err: services.ServiceError) -> list[UserError]:
     return [UserError(code=err.code, message=err.message)]
+
 
 @strawberry.type
 class Query:
@@ -111,6 +160,7 @@ class Query:
         stmt = select(Enrollment).order_by(Enrollment.id).limit(limit)
         return info.context.db.scalars(stmt).all()
 
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
@@ -132,6 +182,7 @@ class Mutation:
             return LikePayload(course=course)
         except services.ServiceError as err:
             return LikePayload(user_errors=as_user_errors(err))
+
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)
 graphql_app = GraphQLRouter(schema, context_getter=get_context)
