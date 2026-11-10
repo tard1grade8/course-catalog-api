@@ -12,6 +12,8 @@ from models import Course, Enrollment, Student
 
 from datetime import datetime
 
+import services
+
 class Context(BaseContext):
     def __init__(self, db: Session):
         super().__init__()
@@ -30,6 +32,7 @@ class CourseType:
     is_elective: bool
     likes: int
     level: str
+    enrollments: list["EnrollmentType"]
 
 @strawberry.type(name="Student")
 class StudentType:
@@ -44,6 +47,29 @@ class EnrollmentType:
     enrolled_at: datetime
     course: CourseType
     student: StudentType
+
+@strawberry.type
+class UserError:
+    code: str
+    message: str
+
+@strawberry.input
+class EnrollInput:
+    course_id: strawberry.ID
+    student_id: strawberry.ID
+
+@strawberry.type
+class EnrollPayload:
+    enrollment: EnrollmentType | None = None
+    user_errors: list[UserError] = strawberry.field(default_factory=list)
+
+@strawberry.type
+class LikePayload:
+    course: CourseType | None = None
+    user_errors: list[UserError] = strawberry.field(default_factory=list)
+
+def as_user_errors(err: services.ServiceError) -> list[UserError]:
+    return [UserError(code=err.code, message=err.message)]
 
 @strawberry.type
 class Query:
@@ -85,5 +111,27 @@ class Query:
         stmt = select(Enrollment).order_by(Enrollment.id).limit(limit)
         return info.context.db.scalars(stmt).all()
 
-schema = strawberry.Schema(query=Query)
+@strawberry.type
+class Mutation:
+    @strawberry.mutation
+    def enroll(self, info: Info, input: EnrollInput) -> EnrollPayload:
+        try:
+            enrollment = services.enroll(
+                info.context.db,
+                course_id=str(input.course_id),
+                student_id=int(input.student_id),
+            )
+            return EnrollPayload(enrollment=enrollment)
+        except services.ServiceError as err:
+            return EnrollPayload(user_errors=as_user_errors(err))
+
+    @strawberry.mutation
+    def like_course(self, info: Info, id: strawberry.ID) -> LikePayload:
+        try:
+            course = services.like_course(info.context.db, course_id=str(id))
+            return LikePayload(course=course)
+        except services.ServiceError as err:
+            return LikePayload(user_errors=as_user_errors(err))
+
+schema = strawberry.Schema(query=Query, mutation=Mutation)
 graphql_app = GraphQLRouter(schema, context_getter=get_context)
