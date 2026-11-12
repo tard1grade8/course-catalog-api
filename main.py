@@ -97,25 +97,6 @@ def create_student(data: StudentIn, db: SessionDep):
 def create_enrollment(data: EnrollmentIn, db: SessionDep):
     return services.enroll(db, course_id=data.course_id, student_id=data.student_id)
 
-
-@app.get("/enrollments", response_model=list[EnrollmentDetail])
-def list_enrollments(db: SessionDep):
-    stmt = (
-        select(
-            Enrollment.id,
-            Enrollment.course_id,
-            Course.title.label("course_title"),
-            Enrollment.student_id,
-            Student.name.label("student_name"),
-            Enrollment.enrolled_at,
-        )
-        .join(Enrollment.course)
-        .join(Enrollment.student)
-        .order_by(Enrollment.id)
-    )
-    return db.execute(stmt).all()
-
-
 @app.get("/stats/courses", response_model=list[CourseStats])
 def course_stats(db: SessionDep):
     enrolled = func.count(Enrollment.id).label("enrolled")
@@ -125,4 +106,35 @@ def course_stats(db: SessionDep):
         .group_by(Course.id)
         .order_by(enrolled.desc(), Course.id)
     )
+    return db.execute(stmt).all()
+
+def enrollment_details():
+    return (
+        select(
+            Enrollment.id,
+            Enrollment.course_id,
+            Enrollment.student_id,
+            Enrollment.enrolled_at,
+            Course.title.label("course_title"),
+            Student.name.label("student_name")
+        )
+        .join(Course)
+        .join(Student)
+        .order_by(Enrollment.id)
+    )
+
+@app.get("/enrollments", response_model=list[EnrollmentDetail])
+def list_enrollments(db: SessionDep):
+    return db.execute(enrollment_details()).all()
+
+@app.get("/students/{student_id}", response_model=StudentOut)
+def get_student(student_id: int, db: SessionDep):
+    student = db.get(Student, student_id)
+    if student is None:
+        raise services.ServiceError("STUDENT_NOT_FOUND", "Student not found")
+    return student
+
+@app.get("/students/{student_id}/enrollments", response_model=list[EnrollmentDetail])
+def list_student_enrollments(student_id: int, db: SessionDep):
+    stmt = enrollment_details().where(Enrollment.student_id == student_id)
     return db.execute(stmt).all()

@@ -273,3 +273,24 @@ In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-lev
 * **Action:** Configured `GRAPHQL_INTROSPECTION=false` in `.env` and restarted the server.
 * **Result:** Introspection queries (such as `{ __schema { queryType { name } } }`) were rejected by the `DisableIntrospection` extension with an error indicating that schema introspection is disabled.
 * **Explanation:** While introspection is essential during local development and public API exploration (e.g., GraphiQL autocompletion), disabling it in closed production environments prevents malicious actors from automatically mapping all available types, queries, and mutations.
+
+---
+
+### Experiment 8. How a Page Learns About a GraphQL Error (and REST vs. GraphQL Benchmark)
+
+* **REST vs. GraphQL Benchmark (`measure.py`):**
+
+| Approach | HTTP Requests | Network Rounds | Payload Size (Bytes) | SQL Queries |
+| :--- | :---: | :---: | :---: | :---: |
+| **REST** (`/students/2`, `/enrollments`, `/courses/*`) | 5 | 2 | ~1160 | 5 |
+| **GraphQL** (`POST /graphql` with `MyCourses` query) | 1 | 1 | ~339 | 3 |
+
+* **Frontend Error Handling Scenarios (`/my-courses`):**
+
+| Failure Scenario | Terminal / Runtime Error | Diagnostic Insight |
+| :--- | :--- | :--- |
+| **Typo in GraphQL query** (`titel` instead of `title`) | `GraphQLRequestError: Cannot query field 'titel' on type 'Course'...` | The explicit `body.errors` check in `gql()` intercepts the HTTP 200 error payload and surfaces the exact schema validation hint. |
+| **Removed `errors` check in `gql()`** with invalid query | `TypeError: Cannot destructure property 'student' of '(intermediate value)' as it is null.` | Because GraphQL returns HTTP `200 OK` on query errors, skipping `body.errors` causes the client to treat `"data": null` as a valid response, hiding the root cause behind a downstream null-reference crash. |
+| **Backend API stopped** (`Ctrl+C`) | `TypeError: fetch failed` | Network-level connection failure thrown by `fetch()` before any HTTP status or GraphQL payload is received. |
+
+* **Conclusion:** Checking `res.ok` alone is insufficient for GraphQL clients because execution and validation errors are delivered inside HTTP `200 OK` responses under the `"errors"` key. A GraphQL fetch wrapper must explicitly inspect `body.errors` and throw a dedicated error class (`GraphQLRequestError`) so the application fails fast with actionable diagnostics instead of crashing later on `null` data.
