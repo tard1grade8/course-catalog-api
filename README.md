@@ -1,6 +1,6 @@
 # Course Catalog API
 
-Backend of the course catalog: FastAPI, SQLAlchemy 2.1+, PostgreSQL, and Alembic migrations (Labs 4–7 of "Advanced Web Technologies").
+Backend of the course catalog: FastAPI, SQLAlchemy 2.1, PostgreSQL, Alembic and GraphQL on Strawberry as a second entrance.
 
 ## How to Run
 
@@ -15,23 +15,18 @@ CREATE DATABASE course_catalog OWNER catalog_app;
 
 Then, from the project folder:
 ```bash
-# Set up environment variables
-cp .env.example .env
-
-# Install dependencies
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-
-# Run database migrations
-python -m alembic upgrade head
-
-# Load initial seed data
+cp .env.example .env
+alembic upgrade head
 psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f seed.sql
-
-# Start the development server
-python -m fastapi dev main.py
+fastapi dev main.py
 ```
 
-API documentation: http://localhost:8000/docs. The password change-me is for teaching; in a real project, passwords are never put into the repository.
+REST docs: http://localhost:8000/docs. GraphQL: http://localhost:8000/graphql.  
+The password `change-me` is for training; real projects don't commit passwords.
 
 ## What was verified
 - The following requests were tested and verified against the expected backend behavior:
@@ -70,6 +65,68 @@ API documentation: http://localhost:8000/docs. The password change-me is for tea
 
 - Error handling: PostgreSQL integrity constraint violations are intercepted during db.commit() and mapped to explicit HTTP error responses (409 Conflict, 404 Not Found) using CONSTRAINT_ERRORS.
 
+## What changed in the API (Lab 8)
+
+- **RFC 9457 Problem Details for REST errors:** Expected business-rule errors (duplicate enrollments, taken emails, missing courses or students) raise `ServiceError` in `services.py` and are converted by `problem.py` into `application/problem+json` responses with `type`, `title`, `status`, `detail`, and `instance`.
+- **Parallel GraphQL endpoint at `/graphql`:** Built with Strawberry (`graphql_api.py`), allowing clients to fetch nested `Course`, `Student`, and `Enrollment` graphs in a single POST request. Unlike REST, GraphQL returns HTTP `200 OK` even when a query fails validation or execution, placing errors in a top-level `"errors"` list.
+- **Mutations and `userErrors`:** Added `enroll` and `likeCourse` mutations that return expected business-rule failures inside `"data"` (`userErrors: [{ code, message }]`), leaving top-level `"errors"` for invalid GraphQL syntax/validation or unexpected server failures.
+- **`X-SQL-Queries` header:** Added `ContextVars`-based SQLAlchemy event middleware (`counter.py`) that counts every SQL statement executed during an HTTP request and attaches the count in the `X-SQL-Queries` response header to benchmark N+1 vs. batched queries.
+- **Server protection and introspection toggle:** Added `QueryDepthLimiter(max_depth=5)`, `MaxAliasesLimiter(max_alias_count=10)`, explicit argument validators (`check_limit` for `1..100` and `parse_id` for integer IDs), `MaskErrors` to hide unhandled database/Python exceptions behind `Unexpected error.`, and `DisableIntrospection` controlled via `GRAPHQL_INTROSPECTION` in `.env`.
+- **New REST student routes:** Added `GET /students/{student_id}` and `GET /students/{student_id}/enrollments` powered by a shared `enrollment_details()` query builder in `main.py`.
+
+## Example queries
+
+The “My courses” query (in the GraphQL Variables panel: `{"id": "2"}`):
+
+```graphql
+query MyCourses($id: ID!) {
+  student(id: $id) {
+    name
+    enrollments {
+      id
+      course {
+        title
+        credits
+        level
+      }
+    }
+  }
+}
+```
+
+The `enroll` mutation and its answer on a repeated enrollment:
+
+```graphql
+mutation EnrollStudent {
+  enroll(input: { courseId: "api-design", studentId: "1" }) {
+    enrollment {
+      id
+      enrolledAt
+    }
+    userErrors {
+      code
+      message
+    }
+  }
+}
+```
+
+```json
+{
+  "data": {
+    "enroll": {
+      "enrollment": null,
+      "userErrors": [
+        {
+          "code": "ALREADY_ENROLLED",
+          "message": "Student is already enrolled in this course"
+        }
+      ]
+    }
+  }
+}
+```
+
 ## Migrations
 
 | Command | What it does |
@@ -82,6 +139,23 @@ API documentation: http://localhost:8000/docs. The password change-me is for tea
 | `alembic check` | Verifies if models and live database schema are in sync. |
 | `alembic upgrade 0001:0002 --sql` | Prints the raw SQL commands of a migration without executing them. |
 | `alembic stamp head` | Marks the database as up to date without running migration scripts. |
+
+## REST vs GraphQL comparison
+
+The “My courses” screen of student 2; numbers from `measure.py`, starting data.
+
+| Criterion | REST | GraphQL | Source |
+| :--- | :--- | :--- | :--- |
+| Requests and rounds per screen | 5 requests in 2 rounds | 1 request in 1 round | `measure.py`, step 8 |
+| Bytes in the responses | 1160 bytes | 339 bytes | `measure.py`, step 8 |
+| SQL queries per screen | 5 SQL queries | 3 SQL queries (batched) | `measure.py`, `X-SQL-Queries` |
+| SQL growth with more students | Linear $O(N)$ without eager joins | Constant: 3 queries (1 per nesting level) | `try_n_plus_1.py`, experiments 4–5 |
+| Error in the query text | HTTP 422 / 400 validation error | HTTP 200 OK with top-level `"errors"` array | experiments 1 and 8 |
+| Expected rule error (repeated enrollment) | HTTP 409 Conflict (`application/problem+json`) | HTTP 200 OK with `data.enroll.userErrors` | steps 1 and 4 |
+| HTTP cache | Built-in URL-based caching (`GET` + `Cache-Control`/`ETag`) | Not cacheable by HTTP intermediaries by default (`POST`) | lecture section 14 |
+| Protection from “expensive” queries | Bounded by fixed route queries and pagination limits | Requires depth/alias limiters, input checks, and error masking | experiments 6 and 7 |
+
+**Conclusion.** I would keep simple single-entity lookups, public catalog lists, and cache-heavy read endpoints on REST because URL-based HTTP caching works out of the box and query cost is fixed per route. I would choose GraphQL for composite screens like “My courses” that aggregate nested relations, as it reduces network traffic from 5 requests across 2 rounds (1160 bytes) to 1 request in 1 round (339 bytes) while keeping database load constant at 3 batched SQL queries via DataLoaders.
 
 ---
 
@@ -187,110 +261,19 @@ In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-lev
 
 ## Experiment Log for Lab 8
 
-### Experiment 1. Query Syntax Error Returns HTTP 200
+| # | Experiment | What I saw | Cause | How I fixed it |
+| :-: | :--- | :--- | :--- | :--- |
+| 1 | a typo in a field name, an argument name in `snake_case` | HTTP `200 OK` with `"data": null` and `"errors"` (`Cannot query field 'titel'...`, unknown argument hint) | GraphQL validates syntax and schema at execution time and returns errors in JSON `"errors"` rather than HTTP `4xx` | Corrected field names to match schema (`title`) and used `camelCase` arguments (`isElective`) |
+| 2 | `\| None` removed from the `course` query, a nonexistent course | Entire top-level `"data"` collapsed to `null`, even when aliased alongside a valid course | Under GraphQL Null Propagation, `null` in a non-nullable field (`!`) bubbles up to the nearest nullable parent (`Query` root) | Restored `CourseType \| None` return type on optional single-item resolvers |
+| 3 | a mutation with the GET method | HTTP `400 Bad Request` (`mutations are not allowed when using GET`); read queries via GET returned `200 OK` | HTTP GET must stay safe and idempotent; Strawberry blocks mutations over GET | Sent all mutations via HTTP `POST` with `Content-Type: application/json` |
+| 4 | `more_students.sql`: 3 and 20 students, the SQL counter | `X-SQL-Queries` jumped from `7` (3 students) to `27` and `24` (20 students) | SQLAlchemy lazy loading issued a separate `SELECT` for each nested relation on every row (N+1 problem) | Added per-request `DataLoader` instances in `Context` to batch lookups into single `WHERE ... IN (...)` queries (`3` queries total) |
+| 5 | a DataLoader batch function that doesn't sort rows by key | `WrongNumberOfResultsReturned` (`expected: 3, received: 6`) on `students`; silent data mismatch on `enrollments` (4 of 6 wrong) | DataLoader maps returned items positionally by input key index; unsorted DB rows break length or misalign indices | Grouped fetched rows into a `defaultdict` by key value and returned results in `keys` order |
+| 6 | six dangerous queries without protection and with it | Unprotected: depth-6 cycle & 12 aliases executed, invalid args leaked SQL/psycopg tracebacks. Protected: all 5 blocked cleanly | GraphQL allows arbitrary query depth/aliases and exposes unhandled exceptions unless guarded | Added `QueryDepthLimiter(5)`, `MaxAliasesLimiter(10)`, `check_limit`, `parse_id`, and `MaskErrors` |
+| 7 | introspection off, a typo in a field name | `{ __schema ... }` was rejected; normal queries with typos still returned `Did you mean` hints | `DisableIntrospection` blocks `__schema`/`__type` meta-fields while keeping standard query validation active | Controlled via `GRAPHQL_INTROSPECTION` env setting (`false` for closed production, `true` for dev) |
+| 8 | client failures: a typo, no `errors` check, the API stopped | 1) `GraphQLRequestError` with field hint; 2) `TypeError` reading `null` data; 3) `TypeError: fetch failed` | GraphQL returns HTTP `200 OK` on query errors, so checking `res.ok` alone passes `data: null` downstream | Checked `body.errors?.length` in `gql()` and threw `GraphQLRequestError` before returning `data` |
 
-* **Action:** Executed GraphQL queries containing typos in field names (e.g., `{ course(id: "api-design") { titel } }`) and using `snake_case` instead of `camelCase` for argument names (e.g., `{ courses(is_elective: true) { id } }`).
-* **Result:** 
-  * HTTP Status: **`200 OK`**.
-  * Response Body: A JSON payload with `"data": null` alongside an `"errors"` array specifying error details (e.g., `"Cannot query field 'titel' on type 'Course'"` or hints for unknown arguments).
-* **Explanation:** Per the GraphQL specification, syntax errors and schema validation failures do not trigger network-layer HTTP error codes (`4xx`/`5xx`), unlike REST APIs. The GraphQL engine processes the HTTP request successfully, returning `200 OK`, and encapsulates execution and validation errors inside the top-level `"errors"` key.
-* **Resolution:** Corrected queries to adhere to the GraphQL schema conventions (using `camelCase` for arguments like `isElective` and exact schema field names like `title`).
+## Decisions
 
----
-
-### Experiment 2. Null Propagation Rule and Non-Nullable Types (`!`)
-
-* **Action:** Temporarily removed `| None` from the `course` resolver return type annotation in `graphql_api.py` (changing the GraphQL field type from `Course` to non-nullable `Course!`). Queried a non-existent course individually and alongside a valid course using aliases (`{ a: course(id: "api-design") { title } b: course(id: "nope") { title } }`).
-* **Result:**
-  * Single query: Returned `"data": null` with the error `"Cannot return null for non-nullable field Query.course"`.
-  * Aliased query: Even though field `a` was valid and could return data, the entire top-level `"data"` object collapsed to `null`.
-* **Explanation:** Under GraphQL's Null Propagation Rule, if a non-nullable field (`!`) yields `null`, the error bubbles up to the nearest parent field that allows `null`. Since the top-level `Query` root cannot be `null`, the entire `"data"` payload is destroyed.
-* **Resolution:** Reverted the resolver signature to `CourseType | None` for optional database entities, ensuring missing resources return `null` safely without wiping out valid data.
-
----
-
-### Experiment 3. Blocking Mutations via HTTP GET
-
-* **Action:** Attempted to execute both read queries and data-modifying mutations using URL query parameters via the HTTP GET method (e.g., `http://localhost:8000/graphql?query=mutation{likeCourse(id:"api-design"){course{likes}}}`).
-* **Result:**
-  * Read query (`query`) via GET returned **`200 OK`** with the requested data.
-  * Mutation (`mutation`) via GET was rejected with **`400 Bad Request`** and the plain text message `mutations are not allowed when using GET`.
-* **Explanation:** Standard HTTP semantics dictate that GET requests must be safe and idempotent (producing no side effects). Strawberry GraphQL enforces this standard by blocking mutations sent via GET requests to prevent accidental state modifications (e.g., from browser prefetching or search indexers).
-
----
-
-### Experiment 4. N+1 Query Problem and Database Call Scaling
-
-* **Action:** Utilized custom SQL counter middleware (`counter.py` injecting the `X-SQL-Queries` HTTP header) to benchmark database query counts for nested GraphQL queries under initial seed data (3 students) vs. expanded seed data (20 students via `more_students.sql`).
-* **Benchmark Results:**
-
-| Query | 3 Students | 20 Students | SQL Query Composition Breakdown |
-| :--- | :---: | :---: | :--- |
-| `students -> enrollments -> course` | 7 | 27 | $1 + N + \text{distinct courses} = 1 + 20 + 6$ |
-| `enrollments -> course, student` | 7 | 24 | $1 + \text{distinct courses} + \text{distinct students} = 1 + 6 + 17$ |
-
-* **Explanation:** Due to SQLAlchemy ORM lazy loading, GraphQL resolvers issue separate SQL queries for each nested relationship on every row. Increasing student rows by 6.6x caused total SQL queries to jump from 7 to 27 (the classic N+1 problem). While latency remains negligible in local GraphiQL testing, this pattern severely degrades performance in production environments under scale.
-
----
-
-### Experiment 5. Broken Batch Function in DataLoader
-
-* **Action:** Temporarily modified the `batch_loader` function in `graphql_api.py` to directly return SQL query results sorted descending by column instead of grouping and ordering rows by the incoming keys (`select(model).where(column.in_(keys)).order_by(column.desc())`).
-* **Result:**
-  * **Length Mismatch Case (`students -> enrollments`):** Executing `{ students { name enrollments { course { title } } } }` triggered a `strawberry.exceptions.WrongNumberOfResultsReturned` exception ("Received wrong number of results in dataloader, expected: 3, received: 6").
-  * **Silent Data Corruption Case (`enrollments -> course`):** Executing `{ enrollments { id course { title } } }` returned no runtime errors, but resulted in incorrect entity associations (e.g., Enrollment 2 was associated with "Backend Foundations: FastAPI" instead of "AI/LLM Integration").
-* **Explanation:** DataLoaders strictly enforce two core contracts:
-  1. The batch loader function must return an array of results with the exact same length as the input key array.
-  2. Each index in the returned result array must strictly correspond to the key at the same index in the input key array.
-  When the array length matches by coincidence (6 keys and 6 rows), positional mapping without key-based dictionary grouping causes silent data mixing, which is far more dangerous than an explicit length error.
-* **Resolution:** Restored `batch_loader` to assemble result arrays explicitly ordered by incoming keys using a `defaultdict` registry.
-
----
-
-### Experiment 6. Dangerous Queries Without Protection and With Protection
-
-* **Action:** Executed 6 potentially harmful GraphQL queries using `try_protection.py` against the server before and after applying validation helpers (`check_limit`, `parse_id`), custom error masking (`MaskErrors`), and Strawberry extensions (`QueryDepthLimiter`, `MaxAliasesLimiter`).
-* **Comparison Results:**
-
-| Query | Without Protection | With Protection |
-| :--- | :--- | :--- |
-| `a depth-6 cycle` | Executed, data returned | `error: 'Cycle' exceeds maximum operation depth of 5` |
-| `12 aliases` | Executed (12 likes applied in 1 POST) | `error: 12 aliases found. Allowed: 10` |
-| `limit: -1` | Unhandled DB Exception (`psycopg.errors.InvalidRowCountInLimitClause`) | `error: limit must be between 1 and 100` |
-| `id: "abc"` | Unhandled Python Exception (`invalid literal for int()`) | `error: Invalid ID: 'abc'` |
-| `id of 20 digits` | Unhandled DB Exception (`psycopg.errors.NumericValueOutOfRange`) | `error: Unexpected error.` |
-| `introspection` | Schema map returned | Schema map returned |
-
-* **Analysis & Answers to Mandatory Questions:**
-  1. **What internal details were exposed without protection?** The unprotected server exposed internal SQL query strings, database driver names (`psycopg`), PostgreSQL constraint names, column names, parameters, and raw Python execution stack traces directly in the `"errors"` JSON payload.
-  2. **Why write explicit checks for `limit` and `id` instead of relying entirely on `MaskErrors`?** Explicit validation raises clean, domain-specific `GraphQLError` messages (e.g., `Invalid ID: 'abc'`), which clearly instruct the client how to fix their query. Relying solely on `MaskErrors` hides all unhandled runtime/DB exceptions behind a generic `Unexpected error.`, making legitimate client debugging impossible for predictable validation errors.
-  3. **Which legitimate query would fail if `max_depth` was lowered to 2?** The standard "My Courses" query (`student -> enrollments -> course`) requires a nesting depth of 3. Lowering `max_depth` to 2 would break legitimate nested relation queries across the API.
-
----
-
-### Experiment 7. Introspection Control in Closed Environments
-
-* **Action:** Configured `GRAPHQL_INTROSPECTION=false` in `.env` and restarted the server.
-* **Result:** Introspection queries (such as `{ __schema { queryType { name } } }`) were rejected by the `DisableIntrospection` extension with an error indicating that schema introspection is disabled.
-* **Explanation:** While introspection is essential during local development and public API exploration (e.g., GraphiQL autocompletion), disabling it in closed production environments prevents malicious actors from automatically mapping all available types, queries, and mutations.
-
----
-
-### Experiment 8. How a Page Learns About a GraphQL Error (and REST vs. GraphQL Benchmark)
-
-* **REST vs. GraphQL Benchmark (`measure.py`):**
-
-| Approach | HTTP Requests | Network Rounds | Payload Size (Bytes) | SQL Queries |
-| :--- | :---: | :---: | :---: | :---: |
-| **REST** (`/students/2`, `/enrollments`, `/courses/*`) | 5 | 2 | ~1160 | 5 |
-| **GraphQL** (`POST /graphql` with `MyCourses` query) | 1 | 1 | ~339 | 3 |
-
-* **Frontend Error Handling Scenarios (`/my-courses`):**
-
-| Failure Scenario | Terminal / Runtime Error | Diagnostic Insight |
-| :--- | :--- | :--- |
-| **Typo in GraphQL query** (`titel` instead of `title`) | `GraphQLRequestError: Cannot query field 'titel' on type 'Course'...` | The explicit `body.errors` check in `gql()` intercepts the HTTP 200 error payload and surfaces the exact schema validation hint. |
-| **Removed `errors` check in `gql()`** with invalid query | `TypeError: Cannot destructure property 'student' of '(intermediate value)' as it is null.` | Because GraphQL returns HTTP `200 OK` on query errors, skipping `body.errors` causes the client to treat `"data": null` as a valid response, hiding the root cause behind a downstream null-reference crash. |
-| **Backend API stopped** (`Ctrl+C`) | `TypeError: fetch failed` | Network-level connection failure thrown by `fetch()` before any HTTP status or GraphQL payload is received. |
-
-* **Conclusion:** Checking `res.ok` alone is insufficient for GraphQL clients because execution and validation errors are delivered inside HTTP `200 OK` responses under the `"errors"` key. A GraphQL fetch wrapper must explicitly inspect `body.errors` and throw a dedicated error class (`GraphQLRequestError`) so the application fails fast with actionable diagnostics instead of crashing later on `null` data.
+- **Centralizing rules in `services.py` with separate error translators:** Keeping business validation and database integrity checks in `services.py` eliminates duplicate logic and guarantees identical behavior across both APIs. Each transport layer then translates `ServiceError` into its native contract—RFC 9457 HTTP 404/409 Problem Details for REST, and structured `userErrors` payloads inside HTTP 200 responses for GraphQL.
+- **Per-request `Context` loaders and value-based key matching:** DataLoaders cache loaded entities by key, so creating them fresh per HTTP request in `Context` prevents stale reads and cross-user data leaks. Matching rows by key value using a dictionary (`defaultdict`) rather than database row position is required because SQL `IN (...)` does not guarantee row order and missing keys must resolve to `None` or `[]` at their exact index.
+- **Two-layered protection (`check_limit`/`parse_id` + `MaskErrors`):** Predictable client input mistakes such as negative limits or non-numeric IDs are validated explicitly and raised as `GraphQLError` so callers receive actionable messages to fix their query. Meanwhile, `MaskErrors` acts as a fallback shield for unforeseen runtime or database faults (such as 20-digit `bigint` overflows), keeping full tracebacks in server logs while exposing only `Unexpected error.` to the client.
