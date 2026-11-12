@@ -106,7 +106,7 @@ class EnrollmentType:
     student_id: strawberry.Private[int]
 
     @strawberry.field
-    async def course(self, info: Info) -> CourseType:
+    async def course(self, info: Info) -> CourseType | None:
         return await info.context.course.load(self.course_id)
 
     @strawberry.field
@@ -158,7 +158,7 @@ class Query:
 
     @strawberry.field
     def course(self, info: Info, id: strawberry.ID) -> CourseType | None:
-        return info.context.db.get(Course, parse_id(id))
+        return info.context.db.get(Course, str(id))
 
     @strawberry.field
     def students(
