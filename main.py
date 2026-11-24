@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,7 +22,7 @@ from schemas import (
 import services
 import counter
 import auth
-from auth import CurrentUser
+from auth import CurrentUser, AdminUser, can_access_student
 
 app = FastAPI(title="Course Catalog API")
 problem.install(app)
@@ -101,8 +101,10 @@ def create_student(data: StudentIn, db: SessionDep):
 
 
 @app.post("/enrollments", response_model=EnrollmentOut, status_code=201)
-def create_enrollment(data: EnrollmentIn, db: SessionDep):
-    return services.enroll(db, course_id=data.course_id, student_id=data.student_id)
+def create_enrollment(data: EnrollmentIn, db: SessionDep, user: CurrentUser):
+    if not can_access_student(user, data.student_id):
+        raise HTTPException(403, "You can enroll only yourself")
+    return services.enroll(db, data.course_id, data.student_id)
 
 @app.get("/stats/courses", response_model=list[CourseStats])
 def course_stats(db: SessionDep):
@@ -131,7 +133,7 @@ def enrollment_details():
     )
 
 @app.get("/enrollments", response_model=list[EnrollmentDetail])
-def list_enrollments(db: SessionDep):
+def list_enrollments(db: SessionDep, _: AdminUser):
     return db.execute(enrollment_details()).all()
 
 @app.get("/students/{student_id}", response_model=StudentOut)
