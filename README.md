@@ -1,6 +1,7 @@
 # Course Catalog API
 
-Backend of the course catalog: FastAPI, SQLAlchemy 2.1, PostgreSQL, Alembic and GraphQL on Strawberry as a second entrance.
+Backend of the course catalog: FastAPI, SQLAlchemy, PostgreSQL, Alembic migrations,
+GraphQL on Strawberry, and JWT login with roles (Labs 4–9, “Advanced Web Technologies”).
 
 ## How to Run
 
@@ -16,17 +17,30 @@ CREATE DATABASE course_catalog OWNER catalog_app;
 Then, from the project folder:
 ```bash
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
+source .venv/bin/activate        # on Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
+
+cp .env.example .env             # on Windows: copy .env.example .env
+# Generate a 32-byte hex key and put it into SECRET_KEY in .env:
+python -c "import secrets; print(secrets.token_hex(32))"
+
 alembic upgrade head
 psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f seed.sql
+python seed_users.py
 fastapi dev main.py
 ```
 
 REST docs: http://localhost:8000/docs. GraphQL: http://localhost:8000/graphql.  
 The password `change-me` is for training; real projects don't commit passwords.
+
+| E-mail | Role | Password |
+| :--- | :--- | :--- |
+| admin@example.com | admin | admin-demo-password |
+| aigerim@example.com | student (student 1) | aigerim-demo-pass |
+| daniyar@example.com | student (student 2) | daniyar-demo-pass |
+| asel@example.com | student (student 3) | asel-demo-password |
+
+`seed.sql` also clears `users`: after it, always run `python seed_users.py`.
 
 ## What was verified
 - The following requests were tested and verified against the expected backend behavior:
@@ -281,3 +295,79 @@ In PostgreSQL, executing an `UPDATE` automatically acquires an exclusive row-lev
 ## Bonus Task 1 (Lab 8)
 
 - **Validation errors as Problem Details (`422`):** Added a `RequestValidationError` handler in `problem.py` that extracts field-level validation failures from Pydantic's `exc.errors()` (mapping `loc` into `in` and dot-joined `field`, and `msg` into `detail`) and returns them as `application/problem+json` (`type: ".../validation-error"`). Under RFC 9457, only `type`, `title`, `status`, `detail`, and `instance` are standard members, while `errors` is a custom extension field included only when multiple per-field validation issues need to be reported at once so the client can fix them in a single pass.
+
+
+## Lab 9
+
+## Access matrix
+
+The codes come from `python try_access.py` (14 of 14 as expected). The “—” cell: the
+administrator has no student profile, so there is nobody to enroll “for yourself”.
+
+| Request | Anonymous | Student | Administrator |
+| :--- | :--- | :--- | :--- |
+| `GET /courses` | 200 | 200 | 200 |
+| `GET /me` | 401 | 200 | 200 |
+| `GET /enrollments` | 401 | 403 | 200 |
+| `POST /enrollments`, for yourself | 401 | 201 | — |
+| `POST /enrollments`, for another | 401 | 403 | 403 |
+
+
+## Open spots
+
+Found by `scan_routes.py` and `scan_graphql.py`; not closed in this lab.
+
+| Route or field | Verdict | How to close it |
+| :--- | :--- | :--- |
+| `GET /` | by design: root/health endpoint is public | no need to close it |
+| `GET /courses` | by design: the catalog is open to everyone | no need to close it |
+| `GET /courses/{id}` | by design: course details are public | no need to close it |
+| `POST /courses/{id}/like` | hole: anonymous callers can increment likes without logging in | require `CurrentUser` and track one like per user in the service layer |
+| `GET /students` | hole: anonymous callers can list all students and their e-mails | add `_: AdminUser` dependency to the route |
+| `POST /students` | hole: anyone can create arbitrary student records | require `AdminUser` (or restrict to self-registration) |
+| `GET /students/{id}` | hole: anonymous callers can inspect student profiles by ID | require `CurrentUser` and check `can_access_student` |
+| `GET /students/{id}/enrollments` | hole: anyone can view any student's course enrollments | require `CurrentUser` and check `can_access_student(user, student_id)` |
+| `GET /stats/courses` | by design: aggregate course statistics are public | no need to close it (or restrict to `AdminUser` if internal) |
+| GraphQL `courses` | by design: the catalog is open to everyone | no need to close it |
+| GraphQL `course` | by design: course details are public | no need to close it |
+| GraphQL `student` | hole: anonymous callers can fetch student objects by ID | add `permission_classes=[IsAuthenticated]` (or `IsAdmin`) |
+| GraphQL `enrollments` | hole: anonymous callers can list all enrollments | add `permission_classes=[IsAdmin]` |
+| GraphQL `Course.enrollments` | hole: leaks enrollment records via nested course queries | add `permission_classes=[IsAdmin]` on `CourseType.enrollments` |
+| GraphQL `Student.enrollments` | hole: leaks a student's enrollments to anonymous or other users | add `permission_classes=[IsSelfOrAdmin]` on `StudentType.enrollments` |
+| GraphQL `enroll` | hole: anonymous callers can enroll any student into any course | require `IsAuthenticated` and check `can_access_student` in the service layer |
+| GraphQL `likeCourse` | hole: anonymous callers can like courses without authentication | add `permission_classes=[IsAuthenticated]` |
+
+## Threat table
+
+| Where | What can break | How it is covered | How I checked |
+| :--- | :--- | :--- | :--- |
+| The login form | User enumeration via different error messages or response times on unknown e-mails | Generic `"Invalid e-mail or password"` message and dummy Argon2id verification when e-mail is missing | `try_auth.py`, `try_timing.py` (Experiment 2) |
+| Passwords and the key | Plaintext password leaks, weak JWT signing keys, or `alg: none` / algorithm confusion | Argon2id hashing (`pwdlib`), startup validation enforcing `SECRET_KEY` ≥ 32 bytes, pinned `HS256` algorithm | `check_users.py`, `try_tokens.py` (Experiments 1 & 3) |
+| Token and role | Stale admin privileges remaining active after role downgrade in the database | JWT carries only `sub` (`user.id`); `role` and `student_id` are loaded fresh from PostgreSQL on every request | `try_access.py`, Experiment 4 |
+| Permissions on objects | BOLA / IDOR: students reading other students' private data or enrolling others | `can_access_student` check in REST and `IsSelfOrAdmin` permission class with nullable `email: str \| None` in GraphQL | `try_access.py`, `try_graphql_access.py` (Experiments 5 & 6) |
+| Cookie and Next.js | XSS stealing JWT from `localStorage` or forged `session` cookie bypassing middleware | JWT stored in an `httpOnly`, `Secure`, `SameSite=Lax` cookie; real verification via `verifySession()` (`GET /me`) in DAL | Browser DevTools check, Experiment 7 |
+| Logout and lifetime | Stolen JWT remaining usable after the user clicks “Log out” | Short token lifetime (`15 min`) and automated route/field scanners catching unprotected endpoints | Experiment 8, `scan_routes.py`, `scan_graphql.py` |
+
+Deliberately not closed:
+
+- Limiting login attempts: the counter must live in shared storage such as Redis (not an in-memory Python dictionary, because multiple Uvicorn worker processes do not share RAM). Limiting solely by e-mail is dangerous because an attacker can intentionally lock out a victim's account (DoS) or spray one password across thousands of e-mails without hitting the per-account threshold, so rate limiting should combine IP address and account keys.
+- The token after “Log out”: for this project, I would add a `token_version` integer column on the `users` table, include `ver` in the JWT payload, and increment `token_version` on logout. Because `get_optional_user` already queries the `User` row from PostgreSQL on every authenticated request, checking `claims["ver"] == user.token_version` requires zero extra database queries or external stores.
+
+## Experiment log
+
+| No. | Experiment | What I saw | Cause | How I fixed it |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | no key, a short key; two hashes of one password | `ValidationError` on missing/short `SECRET_KEY`; two different `$argon2id$...` strings for the same password | `Settings` enforces ≥ 32-byte key at startup; Argon2id generates a unique random salt per hash | Restored valid `SECRET_KEY` in `.env` |
+| 2 | login time with and without `DUMMY_HASH` | Unknown e-mail took ~2 ms vs ~98 ms for known e-mail; with `DUMMY_HASH`, both took ~98 ms | Without `DUMMY_HASH`, missing users skipped Argon2id verification, leaking account existence via timing | Kept `verify_password(password, DUMMY_HASH)` on the unknown-user branch |
+| 3 | nine forged tokens; signature check turned off | All 9 forged tokens rejected (`401`); disabling `verify_signature` accepted forged role/sub claims | PyJWT verifies HMAC signature, `exp`, and `iss` only when signature verification is enabled | Restored full `jwt.decode` verification |
+| 4 | the role changes in the database, the token is the same | After `UPDATE users SET role='admin'`, old token immediately got `200` on `GET /enrollments` | Role is read from PostgreSQL on every request rather than cached inside the JWT payload | Reverted user role back to `student` in DB |
+| 5 | the owner check in `POST /enrollments` removed | Student 1 enrolled Student 2 and received `201 Created` instead of `403` | Without `can_access_student`, any authenticated student could pass an arbitrary `student_id` | Restored `can_access_student` ownership check |
+| 6 | the path closed, not the field; the closed field not nullable | Nested `student(id: "2") { email }` leaked email; non-nullable `email: str` crashed whole query with `null` data | Strawberry checks permissions per field, and a denied non-nullable field bubbles `null` up to `data` | Put `IsSelfOrAdmin` on `StudentType.email` and changed its return type to `str \| None` |
+| 7 | a forged cookie; protection only in `proxy.ts` | With `verifySession()` removed, `Cookie: session=forged.token.value` returned `200` and secret page content | `proxy.ts` only checks whether a `session` cookie exists, without verifying its signature | Restored `verifySession()` in `app/account/page.tsx` |
+| 8 | the token after “Log out” | Calling `GET /me` with the copied Bearer token still returned `200` and user JSON after clicking “Log out” | Logout only deletes the browser cookie; stateless JWTs remain valid until their 15-minute `exp` | Documented limitation in README and selected `token_version` for future revocation |
+
+## Decisions
+
+- **Reading the user's role from the database on every request:** You pay the cost of one primary-key `SELECT` on the `users` table per authenticated request. In return, role changes, account deactivation, or privilege downgrades take effect immediately without waiting for issued tokens to expire.
+- **Nullable GraphQL field with field-level permission:** In GraphQL, `Student` can be reached through multiple paths (`Query.student`, `Enrollment.student`, etc.), so hanging the permission on `StudentType.email` protects all paths at once. Making the field `str | None` allows Strawberry to return `null` for that single restricted field plus an error entry while still returning the public parts of the response (`id`, `name`).
+- **Why `proxy.ts` alone is not enough:** `proxy.ts` runs before rendering and only checks if a cookie named `session` is present, which anyone can forge in seconds. `verifySession()` sits next to the data in the Data Access Layer and validates the token's signature, expiration, and database user via `GET /me`, ensuring a page is never rendered with forged or revoked credentials.
