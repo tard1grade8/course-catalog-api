@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from strawberry.dataloader import DataLoader
 from strawberry.fastapi import BaseContext, GraphQLRouter
 from strawberry.types import Info
+from strawberry.permission import BasePermission
 from graphql import GraphQLError
 from config import settings
 from strawberry.extensions import (
@@ -19,7 +20,8 @@ from strawberry.extensions import (
 )
 
 from db import get_db
-from models import Course, Enrollment, Student
+from models import Course, Enrollment, Student, User
+from auth import can_access_student, get_optional_user
 import services
 
 def check_limit(limit: int) -> int:
@@ -57,20 +59,54 @@ def batch_loader(db: Session, column, many: bool = False) -> DataLoader:
 
 
 class Context(BaseContext):
-    """Created per request: the session and loaders don't outlive the request."""
+    """Per request: the session, the user, and the loaders live for one request."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user: User | None):
         super().__init__()
         self.db = db
+        self.user = user
         self.course = batch_loader(db, Course.id)
         self.student = batch_loader(db, Student.id)
         self.enrollments_of_course = batch_loader(db, Enrollment.course_id, many=True)
         self.enrollments_of_student = batch_loader(db, Enrollment.student_id, many=True)
 
 
-def get_context(db: Annotated[Session, Depends(get_db)]) -> Context:
-    return Context(db)
+def get_context(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User | None, Depends(get_optional_user)],
+) -> Context:
+    return Context(db, user)
 
+class IsAuthenticated(BasePermission):
+    message = "Authentication required"
+
+    def has_permission(self, source, info: Info, **kwargs) -> bool:
+        return info.context.user is not None
+
+
+class IsAdmin(BasePermission):
+    message = "Admin role required"
+
+    def has_permission(self, source, info: Info, **kwargs) -> bool:
+        user = info.context.user
+        return user is not None and user.role == "admin"
+
+
+class IsSelfOrAdmin(BasePermission):
+    """For Student fields: source is the student row itself."""
+
+    message = "Not allowed to read this field"
+
+    def has_permission(self, source, info: Info, **kwargs) -> bool:
+        user = info.context.user
+        return user is not None and can_access_student(user, int(source.id))
+
+
+@strawberry.type(name="User")
+class UserType:
+    id: strawberry.ID
+    email: str
+    role: str
 
 @strawberry.type(name="Course")
 class CourseType:
@@ -91,7 +127,7 @@ class CourseType:
 class StudentType:
     id: strawberry.ID
     name: str
-    email: str
+    email: str | None = strawberry.field(permission_classes=[IsSelfOrAdmin])
 
     @strawberry.field
     async def enrollments(self, info: Info) -> list["EnrollmentType"]:
@@ -160,7 +196,11 @@ class Query:
     def course(self, info: Info, id: strawberry.ID) -> CourseType | None:
         return info.context.db.get(Course, str(id))
 
-    @strawberry.field
+    @strawberry.field(permission_classes=[IsAuthenticated])
+    def me(self, info: Info) -> UserType:
+        return info.context.user
+
+    @strawberry.field(permission_classes=[IsAdmin])
     def students(
         self,
         info: Info,
