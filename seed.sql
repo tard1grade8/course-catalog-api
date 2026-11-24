@@ -1,4 +1,7 @@
-TRUNCATE enrollments, students, courses RESTART IDENTITY;
+-- seed.sql: starting data (the courses are taken from data.py of Labs 4 and 5)
+-- The file can be run again: it first clears the tables (including users).
+-- For the teaching database only! The users are created by seed_users.py.
+TRUNCATE users, enrollments, students, courses RESTART IDENTITY;
 
 INSERT INTO courses (id, title, description, credits, is_elective, likes, level) VALUES
 ('modern-frontend', 'Modern Frontend: React & Next.js', 'React 19, Server Components, and the App Router.', 5, false, 24, 'intermediate'),
@@ -10,8 +13,8 @@ INSERT INTO courses (id, title, description, credits, is_elective, likes, level)
 
 INSERT INTO students (name, email) VALUES
 ('Aigerim Sadykova', 'aigerim@example.com'),
-('Miras Ivanov', 'miras@example.com'),
-('Dana Kassymova', 'dana@example.com');
+('Daniyar Ivanov', 'daniyar@example.com'),
+('Asel Kassymova', 'asel@example.com');
 
 INSERT INTO enrollments (course_id, student_id, enrolled_at) VALUES
 ('modern-frontend', 1, '2026-10-27 12:21:54.331755+05'),
