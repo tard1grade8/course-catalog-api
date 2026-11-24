@@ -17,14 +17,18 @@ from schemas import (
     EnrollmentOut,
     StudentIn,
     StudentOut,
+    UserOut,
 )
 import services
 import counter
+import auth
+from auth import CurrentUser
 
 app = FastAPI(title="Course Catalog API")
 problem.install(app)
 counter.install(app)
 
+app.include_router(auth.router)
 app.include_router(graphql_app, prefix="/graphql")
 
 app.add_middleware(
@@ -45,6 +49,9 @@ def pagination(page: int = 1, page_size: int = 20):
 def read_root():
     return {"message": "Course Catalog API is running"}
 
+@app.get("/me", response_model=UserOut)
+def read_me(user: CurrentUser):
+    return user
 
 @app.get("/courses", response_model=list[CourseOut])
 def list_courses(

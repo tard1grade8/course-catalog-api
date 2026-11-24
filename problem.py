@@ -3,9 +3,9 @@
 from http import HTTPStatus
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from fastapi.exceptions import RequestValidationError
 
 from services import ServiceError
 
@@ -18,25 +18,32 @@ PROBLEMS = {
     "STUDENT_NOT_FOUND": (404, "student-not-found", "Student not found"),
 }
 
+
 def problem(
-        request: Request,
-        status: int,
-        title: str,
-        detail: str | None = None,
-        type: str = "about:blank",
-        headers: dict | None = None,
-        **extra,
+    request: Request,
+    status: int,
+    title: str,
+    detail: str | None = None,
+    type: str = "about:blank",
+    headers: dict | None = None,
+    **extra,
 ) -> JSONResponse:
     body = {
         "type": type,
         "title": title,
-        "status": status
+        "status": status,
     }
     if detail is not None:
         body["detail"] = detail
     body["instance"] = str(request.url.path)
     body.update(extra)
-    return JSONResponse(body, status_code=status, headers=headers, media_type="application/problem+json")
+    return JSONResponse(
+        body,
+        status_code=status,
+        headers=headers,
+        media_type="application/problem+json",
+    )
+
 
 def install(app: FastAPI) -> None:
     @app.exception_handler(ServiceError)
@@ -47,11 +54,21 @@ def install(app: FastAPI) -> None:
             status=status,
             title=title,
             detail=exc.message,
-            type=BASE + type_end
+            type=BASE + type_end,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def on_http_error(request: Request, exc: StarletteHTTPException):
+        return problem(
+            request,
+            status=exc.status_code,
+            title=HTTPStatus(exc.status_code).phrase,
+            detail=str(exc.detail) if exc.detail is not None else None,
+            headers=getattr(exc, "headers", None),
         )
 
     @app.exception_handler(RequestValidationError)
-    async def on_http_error(request: Request, exc: StarletteHTTPException):
+    async def on_validation_error(request: Request, exc: RequestValidationError):
         errors = [
             {
                 "in": err["loc"][0],
