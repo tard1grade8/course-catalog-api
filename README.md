@@ -371,3 +371,18 @@ Deliberately not closed:
 - **Reading the user's role from the database on every request:** You pay the cost of one primary-key `SELECT` on the `users` table per authenticated request. In return, role changes, account deactivation, or privilege downgrades take effect immediately without waiting for issued tokens to expire.
 - **Nullable GraphQL field with field-level permission:** In GraphQL, `Student` can be reached through multiple paths (`Query.student`, `Enrollment.student`, etc.), so hanging the permission on `StudentType.email` protects all paths at once. Making the field `str | None` allows Strawberry to return `null` for that single restricted field plus an error entry while still returning the public parts of the response (`id`, `name`).
 - **Why `proxy.ts` alone is not enough:** `proxy.ts` runs before rendering and only checks if a cookie named `session` is present, which anyone can forge in seconds. `verifySession()` sits next to the data in the Data Access Layer and validates the token's signature, expiration, and database user via `GET /me`, ensuring a page is never rendered with forged or revoked credentials.
+
+### Bonus Task 1: Closed-by-default router (`APIRouter`)
+
+To prevent forgetting authentication checks on new endpoints, routes should be grouped under `protected = APIRouter(dependencies=[Depends(get_current_user)])` by default, leaving only explicitly public endpoints on the root `app`:
+
+- **Move into the `protected` router (require authentication by default):**
+  - `POST /courses/{course_id}/like` — liking a course requires an authenticated user.
+  - `GET /students` — student directory must not be anonymous (additionally requires `AdminUser`).
+  - `POST /students` — creating student records must be restricted (additionally requires `AdminUser`).
+  - `GET /students/{student_id}` — viewing a student profile requires authentication (plus `can_access_student` owner/admin check).
+  - `GET /students/{student_id}/enrollments` — viewing a student's enrollments requires authentication (plus `can_access_student` owner/admin check).
+- **Keep outside the `protected` router (deliberately public):**
+  - `GET /` — root/health check endpoint.
+  - `GET /courses` and `GET /courses/{course_id}` — the course catalog is public by design so prospective students can browse courses without logging in.
+  - `GET /stats/courses` — public aggregate course statistics.

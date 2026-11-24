@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,7 +22,7 @@ from schemas import (
 import services
 import counter
 import auth
-from auth import CurrentUser, AdminUser, can_access_student
+from auth import CurrentUser, AdminUser, can_access_student, get_current_user
 
 app = FastAPI(title="Course Catalog API")
 problem.install(app)
